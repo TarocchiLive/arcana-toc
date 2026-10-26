@@ -77,6 +77,10 @@ nix flake check
 
 模块边界与开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 声明
+
+本项目是独立开发的开源工具。使用者应自行遵守适用的法律法规和平台规则。本项目仅用于学习和交流 Go 及相关框架，请勿用于其他用途。
+
 ## 许可证与致谢
 
 采用 [GPL-3.0-or-later](LICENSE)。
