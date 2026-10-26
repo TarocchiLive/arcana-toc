@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/LingLambda/arcana-toc/internal/fileutil"
 )
 
 // Credential mirrors qqmusic-api-python's Credential model. Expired maps to
@@ -234,32 +234,11 @@ func credentialDirectory(file string, create bool) (*os.File, string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, "", fmt.Errorf("%w: credential directory invalid", ErrCredentialInvalid)
 	}
-	fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	stream, err := openCredentialDirectory(directory)
 	if err != nil {
 		return nil, "", safeCredentialError(err)
 	}
-	return os.NewFile(uintptr(fd), "qqmusic credential directory"), name, nil
-}
-func checkCredentialFile(info os.FileInfo) error {
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return ErrCredentialInvalid
-	}
-	return nil
-}
-
-func checkCredentialTarget(directory *os.File, name string) error {
-	var info unix.Stat_t
-	err := unix.Fstatat(int(directory.Fd()), name, &info, unix.AT_SYMLINK_NOFOLLOW)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode&unix.S_IFMT != unix.S_IFREG || info.Mode&0o777 != 0o600 {
-		return ErrCredentialInvalid
-	}
-	return nil
+	return stream, name, nil
 }
 
 func ReadCredential(file string) (Credential, error) {
@@ -268,14 +247,13 @@ func ReadCredential(file string) (Credential, error) {
 		return Credential{}, err
 	}
 	defer func() { _ = directory.Close() }()
-	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	stream, err := openCredentialAt(directory, name, os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
 		return Credential{}, fmt.Errorf("qqmusic: credential file not found: %w", os.ErrNotExist)
 	}
 	if err != nil {
 		return Credential{}, safeCredentialError(err)
 	}
-	stream := os.NewFile(uintptr(fd), "qqmusic credential")
 	defer func() { _ = stream.Close() }()
 	info, err := stream.Stat()
 	if err != nil || checkCredentialFile(info) != nil {
@@ -320,15 +298,14 @@ func WriteCredential(file string, credential Credential) error {
 	if err != nil {
 		return safeCredentialError(err)
 	}
-	fd, err := unix.Openat(int(directory.Fd()), temporaryName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	stream, err := openCredentialAt(directory, temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return safeCredentialError(err)
 	}
-	stream := os.NewFile(uintptr(fd), "qqmusic credential temporary")
 	defer func() {
 		_ = stream.Close()
 		if temporaryName != "" {
-			_ = unix.Unlinkat(int(directory.Fd()), temporaryName, 0)
+			_ = removeCredentialAt(directory, temporaryName)
 		}
 	}()
 	if err := stream.Chmod(0o600); err != nil {
@@ -349,11 +326,11 @@ func WriteCredential(file string, credential Credential) error {
 		}
 		return safeCredentialError(err)
 	}
-	if err := unix.Renameat(int(directory.Fd()), temporaryName, int(directory.Fd()), name); err != nil {
+	if err := renameCredentialAt(directory, temporaryName, name); err != nil {
 		return safeCredentialError(err)
 	}
 	temporaryName = ""
-	_ = unix.Fsync(int(directory.Fd()))
+	syncCredentialDirectory(directory)
 	return nil
 }
 
@@ -376,17 +353,16 @@ func LockCredential(file string) (*CredentialLock, error) {
 		return nil, err
 	}
 	defer func() { _ = directory.Close() }()
-	fd, err := unix.Openat(int(directory.Fd()), name+".lock", unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
+	stream, err := openCredentialAt(directory, name+".lock", os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return nil, safeCredentialError(err)
 	}
-	stream := os.NewFile(uintptr(fd), "qqmusic credential lock")
 	info, err := stream.Stat()
 	if err != nil || checkCredentialFile(info) != nil {
 		_ = stream.Close()
 		return nil, fmt.Errorf("%w: credential lock permissions", ErrCredentialInvalid)
 	}
-	if err := unix.Flock(int(stream.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := fileutil.Lock(stream); err != nil {
 		_ = stream.Close()
 		return nil, errors.New("qqmusic: credential update already in progress")
 	}

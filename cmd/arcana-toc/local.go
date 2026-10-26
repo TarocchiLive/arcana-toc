@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"github.com/LingLambda/arcana-toc/internal/fileutil"
 )
 
 func ownDataDir(dir string) (*os.File, error) {
@@ -22,12 +22,11 @@ func ownDataDir(dir string) (*os.File, error) {
 	if err := os.Chmod(dir, 0700); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Open(filepath.Join(dir, "service.lock"), unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	f, err := fileutil.Open(filepath.Join(dir, "service.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), "service lock")
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := fileutil.Lock(f); err != nil {
 		_ = f.Close()
 		return nil, errors.New("data directory is already owned by another service")
 	}

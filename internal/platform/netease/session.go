@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/LingLambda/arcana-toc/internal/fileutil"
 )
 
 const sessionFileVersion = 1
@@ -49,14 +49,13 @@ func loadSessionJar(path string) (*sessionJar, error) {
 	}
 	jar := &sessionJar{path: path, cookies: make(map[string]storedCookie)}
 
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	file, err := fileutil.Open(path, os.O_RDONLY, 0600)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return jar, nil
 		}
 		return nil, fmt.Errorf("open credentials")
 	}
-	file := os.NewFile(uintptr(fd), "netease credentials")
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {

@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/LingLambda/arcana-toc/internal/fileutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -108,15 +108,18 @@ func Open(dataDir string) (*Store, error) {
 			return nil, err
 		}
 	}
-	fd, err := unix.Open(dbPath, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	f, err := fileutil.Open(dbPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), "SQLite state")
 	if err := errors.Join(f.Chmod(0600), f.Close()); err != nil {
 		return nil, err
 	}
-	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"}).String()
+	uriPath := filepath.ToSlash(dbPath)
+	if filepath.VolumeName(dbPath) != "" {
+		uriPath = "/" + uriPath
+	}
+	dsn := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

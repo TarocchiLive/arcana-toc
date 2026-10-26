@@ -3,7 +3,7 @@ package player
 import (
 	"context"
 	"errors"
-	"golang.org/x/sys/unix"
+	"github.com/LingLambda/arcana-toc/internal/fileutil"
 	"io"
 	"os"
 )
@@ -21,11 +21,10 @@ func (r *sourceReader) Read(p []byte) (int, error) {
 }
 
 func openAudioFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	f, err := fileutil.Open(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, errors.New("play beep: open source")
 	}
-	f := os.NewFile(uintptr(fd), "audio source")
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > beepDownloadLimit {
 		_ = f.Close()
