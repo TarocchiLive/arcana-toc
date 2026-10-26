@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install audio build and verification dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libasound2-dev pkg-config
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+
+  nix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: Build and test flake
+        run: nix flake check --print-build-logs
+      - name: Smoke installed command
+        run: |
+          nix build --print-build-logs
+          ./result/bin/arcana-toc -version
+          ./result/bin/arcana-toc -help

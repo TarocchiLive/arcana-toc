@@ -1,0 +1,45 @@
+# Editor and OS state
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build, test and Nix output
+/bin/
+/dist/
+/build/
+/coverage/
+/result
+/result-*
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Local runtime data and configuration
+/data/
+/cache/
+/logs/
+/run/
+/tmp/
+/config*.yaml
+/config*.yml
+.env
+.env.*
+*.log
+*.pid
+*.sock
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# Credentials
+/credentials/
+/secrets/
+/qrcode/
+credentials*.json
+cookies*.txt
+*.key
