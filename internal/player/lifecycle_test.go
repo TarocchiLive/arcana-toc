@@ -60,7 +60,11 @@ func TestContextsCancelPendingDownload(t *testing.T) {
 			playbackCtx, cancelPlayback := context.WithCancel(context.Background())
 			defer cancelPlayback()
 			p := NewBeep()
-			defer p.Close()
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
 			result := make(chan error, 1)
 			go func() {
 				_, err := p.Play(prepareCtx, playbackCtx, platform.ResolvedSource{Kind: platform.SourceURL, URL: srv.URL})

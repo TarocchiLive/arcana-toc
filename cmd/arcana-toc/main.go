@@ -29,7 +29,7 @@ func run() error { return runArgs(os.Args[1:]) }
 func runArgs(args []string) error {
 	flags := flag.NewFlagSet("arcana-toc", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	configPath := flags.String("config", "", "path to YAML config file (empty: ~/arcana/toc/config.yaml)")
+	configPath := flags.String("config", "", "path to YAML config file (empty: ~/.arcana/toc/config.yaml)")
 	showVersion := flags.Bool("version", false, "print build information and exit")
 	showTUI := flags.Bool("tui", false, "open the terminal interface for the running service")
 	importCookies := flags.String("import-netease-cookies", "", "import a local Netscape session file and exit")

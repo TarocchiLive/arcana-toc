@@ -29,6 +29,6 @@
 
 提交使用 Conventional Commits，通过 Pull Request 审核。行为变更同步更新使用说明；测试覆盖实际行为和错误边界，保持离线、确定性与相互隔离。
 
-默认配置和运行数据写入 `~/arcana/toc/`。凭据仅由平台适配器管理，敏感文件权限为 `0600`；日志与 API 响应不输出 Cookie 或签名音源 URL。
+默认配置和运行数据写入 `~/.arcana/toc/`。凭据仅由平台适配器管理，敏感文件权限为 `0600`；日志与 API 响应不输出 Cookie 或签名音源 URL。
 
 更新 Go 依赖后运行 `go mod tidy`，同步更新 `flake.nix` 的 `vendorHash`，通过 Go 检查与 Nix 构建。架构约定见 [架构说明](docs/architecture.md)。

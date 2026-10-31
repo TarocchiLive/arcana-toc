@@ -174,7 +174,7 @@ func TestPolicySkipPrioritiesAcrossEntrypoints(t *testing.T) {
 						if route == "delete" && w.Code != http.StatusNoContent {
 							t.Fatalf("delete=%d: %s", w.Code, w.Body.String())
 						}
-						if route != "delete" && ((unavailable && ordinary && w.Code != http.StatusAccepted) || (!(unavailable && ordinary) && w.Code < 400)) {
+						if route != "delete" && ((unavailable && ordinary && w.Code != http.StatusAccepted) || ((!unavailable || !ordinary) && w.Code < 400)) {
 							t.Fatalf("status=%d: %s", w.Code, w.Body.String())
 						}
 					}
