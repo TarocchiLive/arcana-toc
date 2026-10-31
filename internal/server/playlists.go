@@ -168,9 +168,11 @@ func (s *Server) handlePlaylistPlay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The initial track follows playlist order even when subsequent playback is random.
-	if _, _, err := s.startEntryLocked(ctx, pending[0], false); err != nil {
-		s.lastState.Error = "playlist replaced; playback start failed"
-		_ = s.persistLocked()
+	if _, _, err := s.startEntriesLocked(ctx, pending, false, false); err != nil {
+		if !errors.Is(err, errPlaybackRetryExhausted) {
+			s.lastState.Error = "playlist replaced; playback start failed"
+			_ = s.persistLocked()
+		}
 		writePlaybackStartError(w, err)
 		return
 	}

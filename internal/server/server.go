@@ -30,12 +30,16 @@ type Deps struct {
 
 // Server wraps the control HTTP surface, including queue playback scheduling and mode persistence.
 type Server struct {
-	http     *http.Server
-	log      *slog.Logger
-	version  string
-	store    *store.Store
-	adapters map[platform.Platform]platform.Adapter
-	player   player.Player
+	http            *http.Server
+	log             *slog.Logger
+	version         string
+	store           *store.Store
+	adapters        map[platform.Platform]platform.Adapter
+	player          player.Player
+	skipUnavailable bool
+	allowPreview    bool
+	skipOnError     bool
+	sourceTimeout   time.Duration
 
 	pbMu      sync.Mutex
 	pbHandle  player.Handle
@@ -54,12 +58,16 @@ func New(d Deps) *Server {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		log:      d.Logger,
-		version:  d.Version,
-		store:    d.Store,
-		adapters: d.Adapters,
-		player:   d.Player,
-		ctx:      ctx, cancel: cancel, lastState: playbackSnapshot{State: "idle", Volume: 100, Mode: playbackModeSequential},
+		log:             d.Logger,
+		version:         d.Version,
+		store:           d.Store,
+		adapters:        d.Adapters,
+		player:          d.Player,
+		skipUnavailable: d.Config.Player.SkipUnavailable,
+		allowPreview:    d.Config.Player.AllowPreview,
+		skipOnError:     d.Config.Player.SkipOnError,
+		sourceTimeout:   d.Config.Player.SourceTimeout,
+		ctx:             ctx, cancel: cancel, lastState: playbackSnapshot{State: "idle", Volume: 100, Mode: playbackModeSequential},
 	}
 	if d.Store != nil {
 		if _, err := d.Store.GetState("playback", &s.lastState); err != nil {
@@ -502,11 +510,11 @@ func (s *Server) handleQueueDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if active {
-		ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		_, _, nextErr := s.startPendingLocked(ctx, true)
 		cancel()
 		var failure *playbackFailure
-		if nextErr != nil && (!errors.As(nextErr, &failure) || failure.status != http.StatusConflict) {
+		if nextErr != nil && !errors.Is(nextErr, errPlaybackRetryExhausted) && (!errors.As(nextErr, &failure) || failure.status != http.StatusConflict) {
 			s.lastState.Error = "automatic next playback failed"
 			_ = s.persistLocked()
 		}

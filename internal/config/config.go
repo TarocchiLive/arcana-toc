@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,10 @@ log:
   format: text
 player:
   backend: beep
+  skip_unavailable: true
+  allow_preview: true
+  skip_on_error: false
+  source_timeout: 15s
 `
 
 // Config is the full service configuration.
@@ -42,9 +47,13 @@ type Server struct {
 	Port    int    `yaml:"port"`
 }
 
-// Player selects the in-process audio backend.
+// Player configures the in-process audio backend and queue playback.
 type Player struct {
-	Backend string `yaml:"backend"`
+	Backend         string        `yaml:"backend"`
+	SkipUnavailable bool          `yaml:"skip_unavailable"`
+	AllowPreview    bool          `yaml:"allow_preview"`
+	SkipOnError     bool          `yaml:"skip_on_error"`
+	SourceTimeout   time.Duration `yaml:"source_timeout"`
 }
 
 // Log configures the structured logger.
@@ -76,7 +85,13 @@ func Default() Config {
 		Server:  Server{Address: "127.0.0.1", Port: 8974},
 		DataDir: "./data",
 		Log:     Log{Level: "info", Format: "text"},
-		Player:  Player{Backend: "beep"},
+		Player: Player{
+			Backend:         "beep",
+			SkipUnavailable: true,
+			AllowPreview:    true,
+			SkipOnError:     false,
+			SourceTimeout:   15 * time.Second,
+		},
 	}
 }
 
@@ -89,7 +104,7 @@ func DefaultConfigPath() (string, error) {
 	if home == "" {
 		return "", errors.New("resolve home directory: empty path")
 	}
-	return filepath.Join(home, "arcana", "toc", "config.yaml"), nil
+	return filepath.Join(home, ".arcana", "toc", "config.yaml"), nil
 }
 
 func ensureDefaultConfig(path string) error {
@@ -191,6 +206,9 @@ func (c Config) validate() error {
 	}
 	if c.Player.Backend != "beep" {
 		return fmt.Errorf("player.backend: %q is unsupported; only beep is available", c.Player.Backend)
+	}
+	if c.Player.SourceTimeout <= 0 {
+		return errors.New("player.source_timeout: must be positive")
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -91,60 +92,103 @@ func writePlaybackStartError(w http.ResponseWriter, err error) {
 	reply(w, nil, err)
 }
 
-func (s *Server) markAutomaticFailure(entry store.QueueEntry, err error) error {
-	if archiveErr := s.store.ArchiveQueueEntry(entry.ID, "failed"); archiveErr != nil {
-		s.log.Error("archive automatic playback failure failed", "err", archiveErr)
-	}
-	return err
-}
+var errPlaybackRetryExhausted = errors.New("playback retry budget exhausted")
+
+type trackPlaybackFailure struct{ cause error }
+
+func (e *trackPlaybackFailure) Error() string { return e.cause.Error() }
+func (e *trackPlaybackFailure) Unwrap() error { return e.cause }
 
 func (s *Server) startPendingLocked(requestCtx context.Context, automatic bool) (store.QueueEntry, platform.ResolvedSource, error) {
 	entries, err := s.store.QueueEntries("pending")
 	if err != nil {
 		return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: http.StatusInternalServerError, message: "read queue failed", cause: err}
 	}
-	if len(entries) == 0 {
-		return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: http.StatusConflict, message: "queue has no pending entries", cause: errors.New("no pending queue entries")}
-	}
-	entry := entries[0]
-	if s.lastState.Mode == playbackModeRandom {
-		entry = entries[rand.IntN(len(entries))]
-	}
-	return s.startEntryLocked(requestCtx, entry, automatic)
+	return s.startEntriesLocked(requestCtx, entries, automatic, s.lastState.Mode == playbackModeRandom)
 }
 
-func (s *Server) startEntryLocked(requestCtx context.Context, entry store.QueueEntry, automatic bool) (store.QueueEntry, platform.ResolvedSource, error) {
+func (s *Server) startEntriesLocked(ctx context.Context, entries []store.QueueEntry, automatic, random bool) (store.QueueEntry, platform.ResolvedSource, error) {
+	for len(entries) > 0 {
+		if err := ctx.Err(); err != nil {
+			return store.QueueEntry{}, platform.ResolvedSource{}, err
+		}
+		index := 0
+		if random {
+			index = rand.IntN(len(entries))
+		}
+		entry := entries[index]
+		started, source, err := s.startEntryLocked(ctx, entry)
+		if err == nil {
+			return started, source, nil
+		}
+		if ctx.Err() != nil {
+			return started, source, ctx.Err()
+		}
+		if s.ctx.Err() != nil {
+			return started, source, s.ctx.Err()
+		}
+		if errors.Is(err, errPlaybackRetryExhausted) {
+			s.lastState.State = "idle"
+			s.lastState.Entry = nil
+			s.lastState.Position = 0
+			s.lastState.Duration = 0
+			s.lastState.Error = "playback preparation timed out after 30s"
+			if persistErr := s.persistLocked(); persistErr != nil {
+				return started, source, &playbackFailure{status: 500, message: "persist playback failed", cause: persistErr}
+			}
+			return started, source, err
+		}
+		var trackErr *trackPlaybackFailure
+		if !errors.As(err, &trackErr) {
+			return started, source, err
+		}
+		skip, outcome := s.skipOnError, "failed"
+		if errors.Is(err, platform.ErrPermissionDenied) {
+			skip = s.skipUnavailable
+			if skip {
+				outcome = "skipped"
+			}
+		}
+		if skip || automatic {
+			if archiveErr := s.store.ArchiveQueueEntry(entry.ID, outcome); archiveErr != nil {
+				return started, source, &playbackFailure{status: 500, message: "archive playback failure failed", cause: archiveErr}
+			}
+		}
+		if !skip {
+			return started, source, err
+		}
+		if random {
+			entries[index] = entries[len(entries)-1]
+			entries = entries[:len(entries)-1]
+		} else {
+			entries = entries[1:]
+		}
+	}
+	s.lastState.State = "idle"
+	s.lastState.Entry = nil
+	s.lastState.Position = 0
+	s.lastState.Duration = 0
+	if err := s.persistLocked(); err != nil {
+		return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: http.StatusInternalServerError, message: "persist playback failed", cause: err}
+	}
+	return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: http.StatusConflict, message: "queue has no playable pending entries", cause: errors.New("no playable pending queue entries")}
+}
+
+func (s *Server) startEntryLocked(requestCtx context.Context, entry store.QueueEntry) (store.QueueEntry, platform.ResolvedSource, error) {
 	adapter, ok := s.adapters[platform.Platform(entry.Platform)]
 	if !ok {
-		failure := &playbackFailure{status: http.StatusNotImplemented, message: "platform adapter not available", cause: errors.New("platform adapter not available")}
-		if automatic {
-			return store.QueueEntry{}, platform.ResolvedSource{}, s.markAutomaticFailure(entry, failure)
-		}
-		return store.QueueEntry{}, platform.ResolvedSource{}, failure
+		return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: http.StatusNotImplemented, message: "platform adapter not available", cause: errors.New("platform adapter not available")}
 	}
 	ctx, cancel := context.WithCancel(requestCtx)
 	stopCancel := context.AfterFunc(s.ctx, cancel)
 	defer func() { stopCancel(); cancel() }()
-	source, err := s.freshSource(ctx, adapter, platform.TrackRef{Platform: platform.Platform(entry.Platform), TrackID: entry.TrackID})
+	handle, source, err := s.prepareEntry(ctx, adapter, platform.TrackRef{Platform: platform.Platform(entry.Platform), TrackID: entry.TrackID})
 	if err != nil {
-		if automatic {
-			return store.QueueEntry{}, platform.ResolvedSource{}, s.markAutomaticFailure(entry, err)
-		}
-		return store.QueueEntry{}, platform.ResolvedSource{}, err
-	}
-	handle, err := s.player.Play(s.ctx, source)
-	if err != nil {
-		if automatic {
-			return store.QueueEntry{}, platform.ResolvedSource{}, s.markAutomaticFailure(entry, err)
-		}
-		return store.QueueEntry{}, platform.ResolvedSource{}, err
+		return store.QueueEntry{}, platform.ResolvedSource{}, &trackPlaybackFailure{cause: err}
 	}
 	if err := handle.SetVolume(s.lastState.Volume); err != nil {
 		_ = handle.Stop()
-		if automatic {
-			return store.QueueEntry{}, platform.ResolvedSource{}, s.markAutomaticFailure(entry, err)
-		}
-		return store.QueueEntry{}, platform.ResolvedSource{}, err
+		return store.QueueEntry{}, platform.ResolvedSource{}, &playbackFailure{status: 500, message: "set playback volume failed", cause: err}
 	}
 	if err := s.store.UpdateQueueStatus(entry.ID, "playing"); err != nil {
 		_ = handle.Stop()
@@ -238,11 +282,75 @@ func (s *Server) handlePlaybackNext(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"entry_id": entry.ID, "state": "playing", "quality": source.Quality})
 }
+
+// prepareEntry retries complete preparation, never a partially consumed source.
+func (s *Server) prepareEntry(ctx context.Context, adapter platform.Adapter, ref platform.TrackRef) (player.Handle, platform.ResolvedSource, error) {
+	budgetCtx, cancelBudget := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelBudget()
+	exhausted := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return &playbackFailure{status: http.StatusGatewayTimeout, message: "playback preparation timed out after 30s", cause: errPlaybackRetryExhausted}
+	}
+	delay := time.Second
+	for {
+		if budgetCtx.Err() != nil {
+			return nil, platform.ResolvedSource{}, exhausted()
+		}
+		attemptCtx, cancel := context.WithTimeout(budgetCtx, s.sourceTimeout)
+		source, err := s.freshSource(attemptCtx, adapter, ref)
+		var handle player.Handle
+		if err == nil {
+			handle, err = s.player.Play(attemptCtx, s.ctx, source)
+		}
+		attemptErr := attemptCtx.Err()
+		cancel()
+		if ctx.Err() != nil || budgetCtx.Err() != nil {
+			if handle != nil {
+				_ = handle.Stop()
+			}
+			return nil, source, exhausted()
+		}
+		if err == nil && attemptErr == nil {
+			return handle, source, nil
+		}
+		if handle != nil {
+			_ = handle.Stop()
+		}
+		if attemptErr != nil {
+			err = attemptErr
+		}
+		if !errors.Is(err, platform.ErrTemporary) && !errors.Is(err, platform.ErrSourceExpired) && !errors.Is(attemptErr, context.DeadlineExceeded) {
+			return nil, source, err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-budgetCtx.Done():
+			timer.Stop()
+			return nil, source, exhausted()
+		case <-timer.C:
+		}
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
+}
+
 func (s *Server) freshSource(ctx context.Context, a platform.Adapter, ref platform.TrackRef) (platform.ResolvedSource, error) {
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return platform.ResolvedSource{}, err
+		}
 		source, err := a.ResolveSource(ctx, ref, "")
 		if err != nil {
 			return source, err
+		}
+		if err := ctx.Err(); err != nil {
+			return source, err
+		}
+		if source.Preview && !s.allowPreview {
+			return source, fmt.Errorf("preview playback disabled: %w", platform.ErrPermissionDenied)
 		}
 		// Protocol preparation belongs to the adapter. Players only see authorized URLs.
 		if source.Kind != platform.SourceURL {
@@ -256,11 +364,20 @@ func (s *Server) freshSource(ctx context.Context, a platform.Adapter, ref platfo
 		req.Header.Set("Range", "bytes=0-0")
 		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 		if err != nil {
-			return source, errors.New("source CDN unavailable")
+			if ctx.Err() != nil {
+				return source, ctx.Err()
+			}
+			return source, fmt.Errorf("source CDN unavailable: %w", platform.ErrTemporary)
 		}
 		_ = response.Body.Close()
+		if err := ctx.Err(); err != nil {
+			return source, err
+		}
 		if response.StatusCode == 403 {
 			continue
+		}
+		if platform.IsTemporaryHTTPStatus(response.StatusCode) {
+			return source, fmt.Errorf("source CDN rejected playback: %w", platform.ErrTemporary)
 		}
 		if response.StatusCode != 200 && response.StatusCode != 206 {
 			return source, errors.New("source CDN rejected playback")
@@ -291,7 +408,7 @@ func (s *Server) monitor(entry store.QueueEntry, h player.Handle) {
 			if res.Reason == player.EndError {
 				outcome = "failed"
 			}
-			if s.closed {
+			if s.closed || s.ctx.Err() != nil {
 				outcome = "interrupted"
 			}
 			terminalErr := s.store.ArchiveQueueEntry(entry.ID, outcome)
@@ -309,7 +426,7 @@ func (s *Server) monitor(entry store.QueueEntry, h player.Handle) {
 				} else {
 					s.lastState.Error = ""
 				}
-				if s.closed {
+				if s.closed || s.ctx.Err() != nil {
 					s.lastState.State = "interrupted"
 					entry.Status = outcome
 					s.lastState.Entry = &entry
@@ -320,12 +437,19 @@ func (s *Server) monitor(entry store.QueueEntry, h player.Handle) {
 					s.log.Error("persist playback state failed")
 					terminalErr = err
 				}
-				if res.Reason == player.EndEOF && !s.closed && terminalErr == nil {
+				advance := res.Reason == player.EndEOF
+				if res.Reason == player.EndError {
+					advance = s.skipOnError
+					if errors.Is(res.Err, platform.ErrPermissionDenied) {
+						advance = s.skipUnavailable
+					}
+				}
+				if advance && !s.closed && s.ctx.Err() == nil && terminalErr == nil && !errors.Is(res.Err, context.Canceled) && !errors.Is(res.Err, context.DeadlineExceeded) {
 					ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
 					_, _, err := s.startPendingLocked(ctx, true)
 					cancel()
 					var failure *playbackFailure
-					if err != nil && (!errors.As(err, &failure) || failure.status != http.StatusConflict) {
+					if err != nil && !errors.Is(err, errPlaybackRetryExhausted) && (!errors.As(err, &failure) || failure.status != http.StatusConflict) {
 						s.lastState.State = "idle"
 						s.lastState.Entry = nil
 						s.lastState.Error = "automatic next playback failed"
@@ -368,6 +492,7 @@ func (s *Server) monitor(entry store.QueueEntry, h player.Handle) {
 }
 
 func (s *Server) Close() error {
+	s.cancel()
 	s.pbMu.Lock()
 	s.closed = true
 	h := s.pbHandle
@@ -380,7 +505,6 @@ func (s *Server) Close() error {
 	if h != nil {
 		closeErr = h.Stop()
 	}
-	s.cancel()
 	s.monitors.Wait()
 	if s.player != nil {
 		closeErr = errors.Join(closeErr, s.player.Close())

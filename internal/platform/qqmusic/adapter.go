@@ -561,7 +561,8 @@ func (a *Adapter) ResolveSource(ctx context.Context, ref platform.TrackRef, qual
 		source, err := a.resolveHook(ctx, ref, quality)
 		return source, mapPlatformResultError(err)
 	}
-	return a.resolveSource(ctx, ref, quality, defaultQuality)
+	source, err := a.resolveSource(ctx, ref, quality, defaultQuality)
+	return source, mapPlatformResultError(err)
 }
 
 func (a *Adapter) resolveSource(ctx context.Context, ref platform.TrackRef, quality string, defaultQuality bool) (platform.ResolvedSource, error) {
@@ -639,7 +640,7 @@ func (a *Adapter) resolveSource(ctx context.Context, ref platform.TrackRef, qual
 	if urls.Expiration > 0 {
 		expires = time.Now().UTC().Add(time.Duration(urls.Expiration) * time.Second)
 	}
-	return platform.ResolvedSource{Kind: platform.SourceURL, URL: source, Quality: quality, ExpiresAt: expires}, nil
+	return platform.ResolvedSource{Kind: platform.SourceURL, URL: source, Quality: quality, Preview: quality == formatTRY, ExpiresAt: expires}, nil
 }
 
 func mustJSON(value map[string]any) []byte {
@@ -763,14 +764,26 @@ func (a *Adapter) callCGIBatch(ctx context.Context, signed bool, comm map[string
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, errors.New("qqmusic: CGI request failed")
+		return nil, fmt.Errorf("qqmusic: CGI request failed: %w", platform.ErrTemporary)
 	}
 	defer func() { _ = response.Body.Close() }()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if response.StatusCode != http.StatusOK {
+		if platform.IsTemporaryHTTPStatus(response.StatusCode) {
+			return nil, fmt.Errorf("qqmusic: CGI HTTP %d: %w", response.StatusCode, platform.ErrTemporary)
+		}
 		return nil, fmt.Errorf("qqmusic: CGI HTTP %d", response.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxQQBodyBytes+1))
-	if err != nil || len(raw) > maxQQBodyBytes {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("qqmusic: CGI response invalid: %w", platform.ErrTemporary)
+	}
+	if len(raw) > maxQQBodyBytes {
 		return nil, errors.New("qqmusic: CGI response invalid")
 	}
 	return ParseCGIBatchResponse(raw, len(requests))

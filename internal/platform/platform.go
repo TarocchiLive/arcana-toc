@@ -53,6 +53,7 @@ type ResolvedSource struct {
 	URL       string     `json:"url,omitempty"` // SourceURL only; never persisted
 	URI       string     `json:"uri,omitempty"` // SourceClient only
 	Quality   string     `json:"quality,omitempty"`
+	Preview   bool       `json:"preview,omitempty"`
 	ExpiresAt time.Time  `json:"expires_at,omitempty"`
 }
 
@@ -153,11 +154,18 @@ type PlaylistAdapter interface {
 var (
 	ErrPermissionDenied      = errors.New("platform: permission denied for track or quality")
 	ErrSourceExpired         = errors.New("platform: source link expired")
+	ErrTemporary             = errors.New("platform: temporary transport failure")
 	ErrUnsupportedCapability = errors.New("platform: unsupported capability")
 	ErrTrackNotFound         = errors.New("platform: track not found")
 	ErrNotLoggedIn           = errors.New("platform: account not logged in")
 	ErrVerificationRequired  = errors.New("platform: account verification required")
 )
+
+// IsTemporaryHTTPStatus identifies HTTP failures eligible for transport retries.
+// Provider business codes must not be classified using this predicate.
+func IsTemporaryHTTPStatus(status int) bool {
+	return status == 408 || status == 429 || status >= 500 && status <= 599
+}
 
 // QualityError reports that a requested quality does not exist for a track.
 type QualityError struct {

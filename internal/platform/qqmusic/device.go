@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/LingLambda/arcana-toc/internal/platform"
 )
 
 const (
@@ -244,14 +246,26 @@ func (c *DeviceContext) EnsureSession(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("qqmusic: GetSession request failed")
+		return fmt.Errorf("qqmusic: GetSession request failed: %w", platform.ErrTemporary)
 	}
 	defer func() { _ = response.Body.Close() }()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if response.StatusCode != http.StatusOK {
+		if platform.IsTemporaryHTTPStatus(response.StatusCode) {
+			return fmt.Errorf("qqmusic: GetSession HTTP %d: %w", response.StatusCode, platform.ErrTemporary)
+		}
 		return fmt.Errorf("qqmusic: GetSession HTTP %d", response.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if err != nil || len(raw) > maxResponseBytes {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("qqmusic: GetSession response invalid: %w", platform.ErrTemporary)
+	}
+	if len(raw) > maxResponseBytes {
 		return errors.New("qqmusic: GetSession response invalid")
 	}
 	uid, sid, vkey, err := parseSessionResponse(raw)
@@ -396,14 +410,26 @@ func (c *DeviceContext) qimeiLocked(ctx context.Context, now time.Time) (QIMEI, 
 		if ctx.Err() != nil {
 			return QIMEI{}, ctx.Err()
 		}
-		return QIMEI{}, errors.New("qqmusic: QIMEI request failed")
+		return QIMEI{}, fmt.Errorf("qqmusic: QIMEI request failed: %w", platform.ErrTemporary)
 	}
 	defer func() { _ = response.Body.Close() }()
+	if ctx.Err() != nil {
+		return QIMEI{}, ctx.Err()
+	}
 	if response.StatusCode != http.StatusOK {
+		if platform.IsTemporaryHTTPStatus(response.StatusCode) {
+			return QIMEI{}, fmt.Errorf("qqmusic: QIMEI HTTP %d: %w", response.StatusCode, platform.ErrTemporary)
+		}
 		return QIMEI{}, fmt.Errorf("qqmusic: QIMEI HTTP %d", response.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if err != nil || len(raw) > maxResponseBytes {
+	if ctx.Err() != nil {
+		return QIMEI{}, ctx.Err()
+	}
+	if err != nil {
+		return QIMEI{}, fmt.Errorf("qqmusic: QIMEI response invalid: %w", platform.ErrTemporary)
+	}
+	if len(raw) > maxResponseBytes {
 		return QIMEI{}, errors.New("qqmusic: QIMEI response invalid")
 	}
 	qimei, err := parseQIMEIResponse(raw)

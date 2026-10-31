@@ -53,7 +53,9 @@ type Handle interface {
 // (Spotify) belong to dedicated-client backends, not URL players.
 type Player interface {
 	Capabilities() platform.Capabilities
-	Play(ctx context.Context, source platform.ResolvedSource) (Handle, error)
+	// Play bounds source preparation with prepareCtx; after delivery only
+	// playbackCtx controls the handle's lifetime. Both contexts must be non-nil.
+	Play(prepareCtx, playbackCtx context.Context, source platform.ResolvedSource) (Handle, error)
 	// Close releases backend resources and is safe to call during shutdown.
 	Close() error
 }

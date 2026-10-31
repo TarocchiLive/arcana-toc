@@ -56,9 +56,15 @@ func (p *Beep) Capabilities() platform.Capabilities {
 	return platform.Capabilities{DirectURL: true, Seek: true, Volume: true}
 }
 
-func (p *Beep) Play(ctx context.Context, source platform.ResolvedSource) (Handle, error) {
-	if ctx == nil {
+func (p *Beep) Play(prepareCtx, playbackCtx context.Context, source platform.ResolvedSource) (Handle, error) {
+	if prepareCtx == nil || playbackCtx == nil {
 		return nil, errors.New("play beep: nil context")
+	}
+	if err := playbackCtx.Err(); err != nil {
+		return nil, err
+	}
+	if err := prepareCtx.Err(); err != nil {
+		return nil, err
 	}
 	if source.Kind != platform.SourceURL || source.URL == "" {
 		return nil, fmt.Errorf("play beep: %w", platform.ErrUnsupportedCapability)
@@ -73,13 +79,20 @@ func (p *Beep) Play(ctx context.Context, source platform.ResolvedSource) (Handle
 		p.mu.Unlock()
 		return nil, errors.New("play beep: playback already active")
 	}
-	lifetime := ctx
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(prepareCtx)
+	stopPlaybackCancel := context.AfterFunc(playbackCtx, cancel)
+	contextError := func() error {
+		if err := playbackCtx.Err(); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
 	p.preparing = cancel
 	prepared := make(chan struct{})
 	p.prepareDone = prepared
 	p.mu.Unlock()
 	defer func() {
+		stopPlaybackCancel()
 		cancel()
 		p.mu.Lock()
 		p.preparing = nil
@@ -89,10 +102,27 @@ func (p *Beep) Play(ctx context.Context, source platform.ResolvedSource) (Handle
 
 	file, path, contentType, err := p.prepare(ctx, source.URL)
 	if err != nil {
+		if contextErr := contextError(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	if err := contextError(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
 		return nil, err
 	}
 	streamer, format, err := decodeSource(file, contentType, source.URL)
 	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		if contextErr := contextError(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	if err := contextError(); err != nil {
+		_ = streamer.Close()
 		_ = file.Close()
 		_ = os.Remove(path)
 		return nil, err
@@ -107,13 +137,20 @@ func (p *Beep) Play(ctx context.Context, source platform.ResolvedSource) (Handle
 		_ = streamer.Close()
 		_ = file.Close()
 		_ = os.Remove(path)
+		if contextErr := contextError(); contextErr != nil {
+			return nil, contextErr
+		}
 		return nil, err
 	}
 	h := newBeepHandle(p, file, path, streamer, format)
 	p.mu.Lock()
-	if p.closed || p.active != nil || ctx.Err() != nil {
+	contextErr := contextError()
+	if p.closed || p.active != nil || contextErr != nil {
 		p.mu.Unlock()
 		h.finish(Result{Reason: EndStopped})
+		if contextErr != nil {
+			return nil, contextErr
+		}
 		return nil, errors.New("play beep: playback became unavailable")
 	}
 	p.active = h
@@ -122,11 +159,15 @@ func (p *Beep) Play(ctx context.Context, source platform.ResolvedSource) (Handle
 	speaker.Play(h.volume)
 	go func() {
 		select {
-		case <-lifetime.Done():
+		case <-playbackCtx.Done():
 			_ = h.Stop()
 		case <-h.released:
 		}
 	}()
+	if err := contextError(); err != nil {
+		_ = h.Stop()
+		return nil, err
+	}
 	return h, nil
 }
 
@@ -185,9 +226,18 @@ func (p *Beep) prepare(ctx context.Context, rawURL string) (*os.File, string, st
 		if ctx.Err() != nil {
 			return cleanup(ctx.Err())
 		}
-		return cleanup(errors.New("play beep: source request failed"))
+		return cleanup(fmt.Errorf("play beep: source request failed: %w", platform.ErrTemporary))
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if err := ctx.Err(); err != nil {
+		return cleanup(err)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return cleanup(fmt.Errorf("play beep: source request rejected: %w", platform.ErrSourceExpired))
+	}
+	if platform.IsTemporaryHTTPStatus(resp.StatusCode) {
+		return cleanup(fmt.Errorf("play beep: source request rejected: %w", platform.ErrTemporary))
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return cleanup(errors.New("play beep: source request rejected"))
 	}
@@ -199,7 +249,14 @@ func (p *Beep) prepare(ctx context.Context, rawURL string) (*os.File, string, st
 		if ctx.Err() != nil {
 			return cleanup(ctx.Err())
 		}
-		return cleanup(errors.New("play beep: download source"))
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return cleanup(errors.New("play beep: write temporary source"))
+		}
+		return cleanup(fmt.Errorf("play beep: download source: %w", platform.ErrTemporary))
+	}
+	if err := ctx.Err(); err != nil {
+		return cleanup(err)
 	}
 	if written > beepDownloadLimit {
 		return cleanup(errors.New("play beep: source is too large"))

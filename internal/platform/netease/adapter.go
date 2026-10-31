@@ -302,8 +302,8 @@ func (a *Adapter) ArtistSongs(ctx context.Context, id string) ([]platform.Search
 }
 
 // ResolveSource prepares a near-playback URL for ref at the requested quality.
-// Permission failures surface as platform.ErrPermissionDenied; there is no
-// source substitution or preview playback.
+// Permission failures surface as platform.ErrPermissionDenied; sources are never
+// substituted. Preview metadata lets callers enforce their playback policy.
 func (a *Adapter) ResolveSource(ctx context.Context, ref platform.TrackRef, quality string) (platform.ResolvedSource, error) {
 	if ref.Platform != platform.Netease {
 		return platform.ResolvedSource{}, fmt.Errorf("netease adapter: %w for %s", platform.ErrUnsupportedCapability, ref)
@@ -401,9 +401,12 @@ func (a *Adapter) callWeapiWithJar(ctx context.Context, operation, endpoint stri
 		if ctx.Err() != nil {
 			return 0, nil, ctx.Err()
 		}
-		return 0, nil, fmt.Errorf("netease %s: request failed", operation)
+		return 0, nil, fmt.Errorf("netease %s: request failed: %w", operation, platform.ErrTemporary)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if ctx.Err() != nil {
+		return 0, nil, ctx.Err()
+	}
 
 	bodyLimit := maximumBodyBytes
 	// Full playlist metadata and batched song details legitimately exceed the
@@ -413,12 +416,21 @@ func (a *Adapter) callWeapiWithJar(ctx context.Context, operation, endpoint stri
 	}
 	body, err := readResponseBody(resp.Body, bodyLimit)
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
 		return 0, nil, fmt.Errorf("netease %s: %w", operation, err)
+	}
+	if ctx.Err() != nil {
+		return 0, nil, ctx.Err()
 	}
 	if err := a.jar.takeWriteError(); err != nil {
 		return 0, nil, fmt.Errorf("netease %s: failed to persist session", operation)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if platform.IsTemporaryHTTPStatus(resp.StatusCode) {
+			return 0, nil, fmt.Errorf("netease %s: server returned HTTP %d: %w", operation, resp.StatusCode, platform.ErrTemporary)
+		}
 		return 0, nil, fmt.Errorf("netease %s: server returned HTTP %d", operation, resp.StatusCode)
 	}
 
@@ -439,7 +451,7 @@ func readResponseBody(body io.Reader, limit int) ([]byte, error) {
 	limited := io.LimitReader(body, int64(limit)+1)
 	response, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, fmt.Errorf("read response")
+		return nil, fmt.Errorf("read response: %w", platform.ErrTemporary)
 	}
 	if len(response) > limit {
 		return nil, fmt.Errorf("response too large")
@@ -508,9 +520,6 @@ func parseSongURLFor(body []byte, code float64, requested, trackID string) (plat
 	if err != nil || responseTrackID != trackID {
 		return platform.ResolvedSource{}, fmt.Errorf("netease song url: response track mismatch")
 	}
-	if trialResponse(d.FreeTrialInfo) {
-		return platform.ResolvedSource{}, fmt.Errorf("netease song url: %w", platform.ErrPermissionDenied)
-	}
 	if d.URL == "" {
 		switch {
 		case d.Code == 301 || parsed.Code == 301 || int(code) == 301:
@@ -541,6 +550,7 @@ func parseSongURLFor(body []byte, code float64, requested, trackID string) (plat
 		Kind:      platform.SourceURL,
 		URL:       d.URL,
 		Quality:   quality,
+		Preview:   trialResponse(d.FreeTrialInfo),
 		ExpiresAt: expires,
 	}, nil
 }
