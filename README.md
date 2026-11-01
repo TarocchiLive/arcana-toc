@@ -49,6 +49,7 @@ nix build
 ```yaml
 player:
   backend: beep
+  output_device: ""
   skip_unavailable: true
   allow_preview: true
   skip_on_error: false
@@ -57,6 +58,7 @@ player:
 
 已有配置省略上述字段时使用这些默认值：
 
+- `player.output_device`：默认空字符串，继续使用 Beep/Oto 的宿主默认输出。Linux 可填写 `pactl list short sinks` 中的**完整 sink 名称**，例如 `alsa_output.usb-Example.analog-stereo`；通过本地 PulseAudio 或 PipeWire 的 Pulse 兼容服务独立输出。显式配置会在启动时实际创建并验证绑定；设备不存在、服务不可用或播放中设备消失均报错，绝不静默回落桌面。流禁止迁移，不创建虚拟设备、不修改默认设备或系统拓扑。可用 `PULSE_SERVER=unix:/path/to/pulse/native` 指定本地 socket；不支持远程 TCP 服务、默认设备别名。非 Linux 平台非空配置明确拒绝。修改后重启。
 - `player.allow_preview`：默认 `true`，允许播放平台明确标记的试听源；设为 `false` 时按权限不足处理。此限制同时适用于网易云音乐和 QQ 音乐，不根据付费标识、时长或文件大小猜测试听。
 - `player.skip_unavailable`：默认 `true`，平台明确返回版权、会员权限不足或因关闭试听而拒绝播放时，将曲目归档为 `skipped` 并继续队列。设为 `false` 时停止；`skip_on_error` 不会覆盖这一选择。
 - `player.skip_on_error`：默认 `false`。开启后，其他不可重试的单曲准备错误或播放中的错误会将曲目归档为 `failed` 并继续队列；播放中断不会从头重试同一首。关闭时遇到这些错误停播。停止时，手动准备失败保留待播条目，自动准备失败归档为 `failed`。

@@ -16,7 +16,7 @@
         {
           default = pkgs.buildGoModule {
             pname = "arcana-toc";
-            version = "0.1.1";
+            version = "0.1.2";
             src = pkgs.lib.cleanSource ./.;
             vendorHash = "sha256-6HX9cVzeb+s5RsoCSV6YEyg9GJU/UgA1gtqb+KL/geI=";
             subPackages = [ "cmd/arcana-toc" ];
