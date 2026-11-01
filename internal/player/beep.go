@@ -35,21 +35,36 @@ var (
 	beepSpeakerErr  error
 )
 
-// Beep is an in-process URL player. It downloads one authorized source to a
-// private temporary file, decodes it with Beep, and writes PCM through Oto.
-// The service owns the single speaker instance and one active handle.
+// Beep 下载授权音源至私有临时文件并解码，再交给默认 Oto 或显式 Pulse 输出。
+// 服务独占一个活跃句柄；显式输出的连接和泵随句柄回收。
 type Beep struct {
-	mu          sync.Mutex
-	active      *beepHandle
-	closed      bool
-	httpClient  *http.Client
-	preparing   context.CancelFunc
-	prepareDone chan struct{}
+	mu           sync.Mutex
+	active       *beepHandle
+	closed       bool
+	httpClient   *http.Client
+	preparing    context.CancelFunc
+	prepareDone  chan struct{}
+	outputDevice string
+	outputWG     sync.WaitGroup
 }
 
 // NewBeep returns an in-process player using the host's default audio device.
 func NewBeep() *Beep {
 	return &Beep{httpClient: &http.Client{Timeout: 2 * time.Minute}}
+}
+
+// NewBeepWithOutput 在启动时验证显式输出；空字符串保留默认跨平台输出。
+func NewBeepWithOutput(device string) (*Beep, error) {
+	p := NewBeep()
+	if device != "" {
+		output, err := openDeviceOutput(context.Background(), device)
+		if err != nil {
+			return nil, err
+		}
+		output.close()
+	}
+	p.outputDevice = device
+	return p, nil
 }
 
 func (p *Beep) Capabilities() platform.Capabilities {
@@ -133,7 +148,13 @@ func (p *Beep) Play(prepareCtx, playbackCtx context.Context, source platform.Res
 		_ = os.Remove(path)
 		return nil, errors.New("play beep: source has no decodable audio")
 	}
-	if err := initBeepSpeaker(); err != nil {
+	var output deviceOutput
+	if p.outputDevice != "" {
+		output, err = openDeviceOutput(ctx, p.outputDevice)
+	} else {
+		err = initBeepSpeaker()
+	}
+	if err != nil {
 		_ = streamer.Close()
 		_ = file.Close()
 		_ = os.Remove(path)
@@ -143,6 +164,11 @@ func (p *Beep) Play(prepareCtx, playbackCtx context.Context, source platform.Res
 		return nil, err
 	}
 	h := newBeepHandle(p, file, path, streamer, format)
+	h.output = output
+	if output != nil {
+		// 显式输出由泵负责排空和结束通知，不提前关闭最后一段 PCM。
+		h.ctrl.Streamer = h.stream
+	}
 	p.mu.Lock()
 	contextErr := contextError()
 	if p.closed || p.active != nil || contextErr != nil {
@@ -156,7 +182,12 @@ func (p *Beep) Play(prepareCtx, playbackCtx context.Context, source platform.Res
 	p.active = h
 	p.mu.Unlock()
 	// Close waits for preparation to finish before stopping this handle.
-	speaker.Play(h.volume)
+	if output == nil {
+		speaker.Play(h.volume)
+	} else {
+		p.outputWG.Add(1)
+		output.start(h)
+	}
 	go func() {
 		select {
 		case <-playbackCtx.Done():
@@ -380,9 +411,11 @@ type beepHandle struct {
 	paused      bool
 	volumeValue int
 	finished    bool
+	seekVersion uint64
 	terminal    Status
 	doneOnce    sync.Once
 	closeOnce   sync.Once
+	output      deviceOutput
 }
 
 func newBeepHandle(player *Beep, file *os.File, path string, raw beep.StreamSeekCloser, format beep.Format) *beepHandle {
@@ -447,6 +480,9 @@ func (h *beepHandle) Resume() error {
 }
 
 func (h *beepHandle) Stop() error {
+	if h.output != nil {
+		defer h.output.wait()
+	}
 	speaker.Lock()
 	h.mu.Lock()
 	if h.finished {
@@ -482,6 +518,7 @@ func (h *beepHandle) Seek(offset time.Duration) error {
 		return errors.New("seek audio source")
 	}
 	h.stream.reset()
+	h.seekVersion++
 	return nil
 }
 
@@ -557,6 +594,9 @@ func (h *beepHandle) finish(result Result) {
 
 func (h *beepHandle) cleanup() {
 	h.closeOnce.Do(func() {
+		if h.output != nil {
+			h.output.close()
+		}
 		_ = h.raw.Close()
 		_ = h.file.Close()
 		_ = os.Remove(h.path)
@@ -585,10 +625,14 @@ func (p *Beep) Close() error {
 	if cancel != nil {
 		cancel()
 		<-prepared
+		p.mu.Lock()
+		h = p.active
+		p.mu.Unlock()
 	}
 	if h != nil {
-		return h.Stop()
+		_ = h.Stop()
 	}
+	p.outputWG.Wait()
 	return nil
 }
 

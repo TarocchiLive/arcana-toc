@@ -27,6 +27,7 @@ log:
   format: text
 player:
   backend: beep
+  output_device: ""
   skip_unavailable: true
   allow_preview: true
   skip_on_error: false
@@ -50,6 +51,7 @@ type Server struct {
 // Player configures the in-process audio backend and queue playback.
 type Player struct {
 	Backend         string        `yaml:"backend"`
+	OutputDevice    string        `yaml:"output_device"`
 	SkipUnavailable bool          `yaml:"skip_unavailable"`
 	AllowPreview    bool          `yaml:"allow_preview"`
 	SkipOnError     bool          `yaml:"skip_on_error"`

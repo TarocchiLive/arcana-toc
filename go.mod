@@ -10,6 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gopxl/beep v1.4.1
 	github.com/gorilla/websocket v1.5.3
+	github.com/jfreymuth/pulse v0.1.3
 	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/mewkiz/flac v1.0.14
@@ -38,7 +39,6 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
 	github.com/jfreymuth/oggvorbis v1.0.5 // indirect
-	github.com/jfreymuth/pulse v0.1.3 // indirect
 	github.com/jfreymuth/vorbis v1.0.2 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

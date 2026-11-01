@@ -11,5 +11,5 @@ func newPlayer(cfg config.Player) (player.Player, error) {
 	if cfg.Backend != "beep" {
 		return nil, errors.New("unsupported player backend")
 	}
-	return player.NewBeep(), nil
+	return player.NewBeepWithOutput(cfg.OutputDevice)
 }
